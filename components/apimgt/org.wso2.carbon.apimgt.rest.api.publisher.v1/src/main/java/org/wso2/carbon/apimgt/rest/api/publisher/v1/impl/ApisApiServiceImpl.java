@@ -4541,7 +4541,8 @@ public class ApisApiServiceImpl implements ApisApiService {
             APIRevisionDeployment apiRevisionDeployment = ApisApiServiceImplUtils.mapAPIRevisionDeploymentWithValidation(revisionId,
                     environments, environment, displayOnDevportal, vhost, true);
 
-            validateEndpointsForGatewayEnvironmentType(environments.get(environment), apiRevisionDto);
+            validateEndpointsForGatewayEnvironmentType(environments.get(environment), apiRevisionDto, revisionId,
+                    apiProvider, organization);
             apiRevisionDeployments.add(apiRevisionDeployment);
         }
         Map<String, String> complianceResult = PublisherCommonUtils.checkGovernanceComplianceSync(apiId,
@@ -5425,12 +5426,16 @@ public class ApisApiServiceImpl implements ApisApiService {
      * not define. Mirrors the guard in TemplateBuilderUtil#createAPIGatewayDTOtoPublishAPI, which would otherwise
      * skip the API during synapse artifact generation and surface as "Storage returned null" on the gateway.
      *
-     * @param environment target gateway environment
-     * @param apiDto      API being deployed
+     * @param environment  target gateway environment
+     * @param apiDto       API being deployed
+     * @param revisionId   UUID of the revision being deployed
+     * @param apiProvider  API provider used to read the revision's named endpoints
+     * @param organization organization of the API
      * @throws APIManagementException if the API does not define the endpoint required by the environment type
      */
-    private void validateEndpointsForGatewayEnvironmentType(Environment environment, APIDTO apiDto)
-            throws APIManagementException {
+    private void validateEndpointsForGatewayEnvironmentType(Environment environment, APIDTO apiDto,
+                                                            String revisionId, APIProvider apiProvider,
+                                                            String organization) throws APIManagementException {
 
         if (environment == null || apiDto == null) {
             return;
@@ -5442,6 +5447,14 @@ public class ApisApiServiceImpl implements ApisApiService {
                 APIConstants.GATEWAY_ENV_TYPE_SANDBOX.equals(environmentType);
         // 'hybrid' environments impose no endpoint requirement, matching the generation-time guard
         if (!requiresProductionEndpoint && !requiresSandboxEndpoint) {
+            return;
+        }
+        // An AI API keeps its endpoints as named endpoints outside its endpoint configuration, so the configuration
+        // alone can lack a stage the API still serves. Accept it on a named endpoint of the required stage, as the
+        // generation-time guard (TemplateBuilderUtil#hasEndpoint) does.
+        if (isAiApiWithNamedEndpointOfStage(apiDto, requiresProductionEndpoint
+                ? APIConstants.APIEndpoint.PRODUCTION : APIConstants.APIEndpoint.SANDBOX, revisionId, apiProvider,
+                organization)) {
             return;
         }
         if (!(apiDto.getEndpointConfig() instanceof Map)) {
@@ -5498,6 +5511,30 @@ public class ApisApiServiceImpl implements ApisApiService {
                     ExceptionCodes.MISSING_ENDPOINT_FOR_GATEWAY_ENV_TYPE, environment.getName(),
                     APIConstants.GATEWAY_ENV_TYPE_SANDBOX), log);
         }
+    }
+
+    /**
+     * Whether the API is an AI API whose revision holds a named endpoint of the given deployment stage.
+     *
+     * @param apiDto          API being deployed
+     * @param deploymentStage {@link APIConstants.APIEndpoint#PRODUCTION} or {@link APIConstants.APIEndpoint#SANDBOX}
+     * @param revisionId      UUID of the revision being deployed
+     * @param apiProvider     API provider used to read the revision's named endpoints
+     * @param organization    organization of the API
+     * @return true if the API is an AI API with a named endpoint of that stage
+     * @throws APIManagementException if the named endpoints cannot be read
+     */
+    private static boolean isAiApiWithNamedEndpointOfStage(APIDTO apiDto, String deploymentStage, String revisionId,
+                                                           APIProvider apiProvider, String organization)
+            throws APIManagementException {
+
+        if (apiDto.getSubtypeConfiguration() == null
+                || !APIConstants.API_SUBTYPE_AI_API.equals(apiDto.getSubtypeConfiguration().getSubtype())) {
+            return false;
+        }
+        List<APIEndpointInfo> endpoints = apiProvider.getAllAPIEndpointsByUUID(revisionId, organization);
+        return endpoints != null && endpoints.stream()
+                .anyMatch(endpoint -> deploymentStage.equals(endpoint.getDeploymentStage()));
     }
 
 }
